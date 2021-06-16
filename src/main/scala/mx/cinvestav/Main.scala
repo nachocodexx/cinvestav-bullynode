@@ -1,5 +1,7 @@
 package mx.cinvestav
 
+//
+import mx.cinvestav.commons.commands.Identifiers
 // Cats
 import cats.implicits._
 import cats.effect.{ExitCode, IO, IOApp, MonadCancel, Ref}
@@ -36,7 +38,7 @@ object Main extends IOApp{
   = {
     utils.consumeJson(queueName = queueName)
       .evalMap{ command=>  command.commandId match {
-        case  CommandsId.HEARTBEAT=> CommandHanlders.heartbeat(command,state)
+        case  Identifiers.HEARTBEAT=> CommandHanlders.heartbeat(command,state)
         }
       }
       .interruptWhen(leaderSignal)
@@ -47,33 +49,20 @@ object Main extends IOApp{
   def  program(queueName:String,state:Ref[IO,NodeState])(implicit utils:RabbitMQUtils[IO]) =
     utils.consumeJson(queueName)
     .evalMap{ command=> command.commandId  match {
-      case CommandsId.REMOVE_NODE =>
+      case Identifiers.REMOVE_NODE =>
         CommandHanlders.removeNode(command,state)
-      case CommandsId.RESET_STATE =>
+      case Identifiers.RESET_STATE =>
         CommandHanlders.resetState(command,state)
-      case CommandsId.ELECTIONS =>
+      case Identifiers.ELECTIONS =>
         CommandHanlders.elections(command,state)
-      case CommandsId.OK =>
+      case Identifiers.OK =>
         CommandHanlders.ok(command,state)
-      case CommandsId.COORDINATOR =>
+      case Identifiers.COORDINATOR =>
         CommandHanlders.coordinator(command,state)
-//        IO.println("COORDINATOR!")
+      case Identifiers.RUN =>
+        CommandHanlders.run(command,state)
       case _ =>  state.get.map(_.status).flatMap{  s=>
-//        if(s==statusx.BullyStatus.Election)
-//          IO.println("WE ARE IN ELECTION STATUS!!")
-//        else
-          for {
-            _<-IO.println("HEREEE!!")
-            currentState <- state.get
-            leaderSignal <- currentState.leaderSignal.pure[IO]
-            leaderHbQueue <- s"${config.poolId}-heartbeat".pure[IO]
-            _   <- utils.declareQueue(leaderHbQueue,durable = Durable,exclusive = NonExclusive,autoDelete = NonAutoDelete)
-            _ <- if(command.commandId == "TEST") leaderSignal.set(true)
-            else (Stream.eval(leaderSignal.set(false)) ++ Helpers.monitoringLeaderNodeS(leaderHbQueue,state,
-              leaderSignal))
-              .compile.drain.start
-          } yield ()
-//          IO.println("UKNOWN COMMAND")
+        Logger[IO].debug("UKNOWN COMMAND")
       }
     }
 

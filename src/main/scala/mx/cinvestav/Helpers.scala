@@ -18,12 +18,13 @@ import org.typelevel.log4cats.Logger
 
 import scala.concurrent.duration._
 import scala.language.postfixOps
+import mx.cinvestav.commons.commands.Identifiers
 
 object Helpers {
   def startLeaderHeartbeat()(implicit utils: RabbitMQUtils[IO],config: DefaultConfig): IO[Unit] = for {
     _   <- IO.println(s"START HEARTBEAT[${config.node}]")
     pub <- utils.createPublisher(config.poolId,s"${config.poolId}.${config.node}.default")
-    cmd <- CommandData[Json](CommandsId.START_HEARTBEAT,Json.Null).asJson.noSpaces.pure[IO]
+    cmd <- CommandData[Json](Identifiers.START_HEARTBEAT,Json.Null).asJson.noSpaces.pure[IO]
     _   <- pub(cmd)
   } yield ()
 
@@ -32,7 +33,7 @@ object Helpers {
   = {
     utils.consumeJson(queueName = queueName)
       .evalMap{ command=>  command.commandId match {
-        case  CommandsId.HEARTBEAT=> CommandHanlders.heartbeat(command,state)
+        case  Identifiers.HEARTBEAT=> CommandHanlders.heartbeat(command,state)
       }
       }
       .interruptWhen(leaderSignal)
@@ -75,16 +76,17 @@ object Helpers {
         previousState  <- state.getAndUpdate(_.copy(isLeader = true,status = status.Up,leader = config.node, shadowLeader = config.nodeId))
         //        Send stop heart command
         previousLeaderPub <-  utils.createPublisher(config.poolId,s"${config.poolId}.${previousState.leader}.default")
-        stopCmd           <- CommandData[Json](CommandsId.STOP_HEARTBEAT,Json.Null).asJson.noSpaces.pure[IO]
+        stopCmd           <- CommandData[Json](Identifiers.STOP_HEARTBEAT,Json.Null).asJson.noSpaces.pure[IO]
         _                 <- previousLeaderPub(stopCmd)
         // Start heart in new leader node
         currentLeaderPub <-  utils.createPublisher(config.poolId,s"${config.poolId}.${config.node}.default")
-        startCmd          <- CommandData[Json](CommandsId.START_HEARTBEAT,Json.Null).asJson.noSpaces.pure[IO]
+        startCmd          <- CommandData[Json](Identifiers.START_HEARTBEAT,Json.Null).asJson.noSpaces.pure[IO]
         _                 <- currentLeaderPub(startCmd)
         //
         _              <- _signal.set(true)
         pubs           <- lowest.map(_._2).pure[IO]
-        coordinatorCmd <- CommandData[Json](CommandsId.COORDINATOR,Payloads.Coordinator(config.node,config.nodeId).asJson).asJson.noSpaces.pure[IO]
+        coordinatorCmd <- CommandData[Json](Identifiers.COORDINATOR,Payloads.Coordinator(config.node,config.nodeId).asJson)
+          .asJson.noSpaces.pure[IO]
         _              <- pubs.traverse(p=>p(coordinatorCmd))
         _              <- Logger[IO].debug("SEND COORDINATOR COMMAND")
 
@@ -98,8 +100,8 @@ object Helpers {
           for {
             currentState <- state.get
             _signal      <- currentState.electionSignal.pure[IO]
-            _            <- if(x == 10) sendCoordinatorCmd(_signal) else IO.unit
             okMessages   <- currentState.okMessages.pure[IO]
+            _            <- if(x >= 15 && okMessages.nonEmpty) sendCoordinatorCmd(_signal) else IO.unit
             _            <- Logger[IO].debug(s"OK MESSAGES[Retries = $x, okMessages = ${okMessages.length}]! - ${highest.length}")
 //            _            <- IO.println(okMessages)
             _            <- if(okMessages.isEmpty)  _signal.set(true) else IO.unit
@@ -113,21 +115,25 @@ object Helpers {
     def sendCmd(publishers:List[String=>IO[Unit]],commandData: CommandData[Json]) = for {
       res          <- publishers.traverse(p=>p(commandData.asJson.noSpaces))
     } yield ()
+    def doBully() = for {
+
+    } yield ()
 
     for {
       _            <- Logger[IO].debug("INIT ELECTIONS")
       currentState <- state.updateAndGet(_.copy(status= statusx.BullyStatus.Election))
       //   Highest nodes
       highestNodes <- currentState.bullyNodes.filter(_.priority>config.priority).map(_.nodeId).pure[IO]
+      _            <- if(highestNodes.isEmpty) IO.println("COORDINATOR") else IO.println("DO BULLY")
       highestPubs  <- highestNodes.traverse(Helpers.createBullyNode)
-      electionCmd  <- CommandData[Json](CommandsId.ELECTIONS,Payloads.Election(config.node,config.nodeId).asJson).pure[IO]
+      electionCmd  <- CommandData[Json](Identifiers.ELECTIONS,Payloads.Election(config.node,config.nodeId).asJson).pure[IO]
 //      SAVE OK MESSAGES
-      _           <- state.update(s=>s.copy(okMessages = highestNodes.indices.toList))
+//      _           <- state.update(s=>s.copy(okMessages = highestNodes.indices.toList))
+      _           <- state.update(s=>s.copy(okMessages = highestNodes))
 //    Lowest nodes
       lowestNodes   <- currentState.bullyNodes
-//        .filter(_.nodeId!=currentState.leader)
         .filter(_.priority < config.priority)
-        .map(_.nodeId).pure[IO].map(_:+currentState.shadowLeader)
+        .map(_.nodeId).pure[IO].map(_:+currentState.shadowLeader).map(_.toSet.toList)
       lowestPubs    <- lowestNodes.traverse(Helpers.createBullyNode)
       _            <- Logger[IO].debug(s"HIGHEST: $highestNodes")
       _            <- Logger[IO].debug(s"LOWEST: $lowestNodes")

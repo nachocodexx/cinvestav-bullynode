@@ -13,7 +13,7 @@ case class NodeState(
                       status:Status,
                       leader:String,
                       shadowLeader:String,
-                      okMessages:List[Int]= Nil,
+                      okMessages:List[String]= Nil,
                       //                    Experimental
                       electionSignal:SignallingRef[IO,Boolean],
                       leaderSignal:SignallingRef[IO,Boolean]

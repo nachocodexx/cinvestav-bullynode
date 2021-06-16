@@ -12,6 +12,7 @@ import mx.cinvestav.config.DefaultConfig
 import mx.cinvestav.domain.Payloads
 import mx.cinvestav.utils.{Command, RabbitMQUtils}
 import mx.cinvestav.commons.status
+import mx.cinvestav.commons.commands.Identifiers
 import org.typelevel.log4cats.Logger
 
 object CommandHanlders {
@@ -20,6 +21,14 @@ object CommandHanlders {
   implicit val heartbeatDecoder: Decoder[payloads.HeartbeatPayload] = deriveDecoder[payloads.HeartbeatPayload]
   implicit val removeNodeDecoder:Decoder[Payloads.RemoveNode] = deriveDecoder
   implicit val electionsDecoder:Decoder[Payloads.Election] = deriveDecoder
+
+  def run(command: Command[Json],state:Ref[IO,NodeState])(implicit utils: RabbitMQUtils[IO],logger: Logger[IO]) =
+    command.payload.as[Payloads.Run] match {
+      case Left(e) =>
+        IO.println(e.getMessage())
+      case Right(payload) =>
+        IO.println(payload)
+    }
 
   def coordinator(command: Command[Json],state:Ref[IO,NodeState])(implicit utils: RabbitMQUtils[IO],
                                                                   config:DefaultConfig,logger: Logger[IO]):IO[Unit] = command.payload.as[Payloads.Coordinator] match {
@@ -43,7 +52,7 @@ object CommandHanlders {
       case Left(e) =>
         IO.println(e.getMessage())
       case Right(payload) =>
-        state.update(s=>s.copy(okMessages = s.okMessages.filter(_ != payload.id)))
+        state.update(s=>s.copy(okMessages = s.okMessages.filter(_ != payload.nodeId)))
     }
   def elections(command: Command[Json],state:Ref[IO,NodeState])(implicit utils:RabbitMQUtils[IO],
                                                                 config:DefaultConfig,logger: Logger[IO]): IO[Unit] =
@@ -54,9 +63,10 @@ object CommandHanlders {
         for {
           _           <- IO.println(s"NEW ELECTIONS -> ${payload.shadowNodeId} - ${payload.nodeId}")
           okPublisher <- utils.createPublisher(config.poolId,s"${config.poolId}.${payload.shadowNodeId}.default")
-          heartbeat   <- state.get.map(_.heartBeatCounter)
-          okCommand   <- CommandData[Json](CommandsId.OK,Payloads.Ok(heartbeat,config.nodeId).asJson).pure[IO]
+//          heartbeat   <- state.get.map(_.heartBeatCounter)
+          okCommand   <- CommandData[Json](Identifiers.OK,Payloads.Ok(config.nodeId).asJson).pure[IO]
           _           <- okPublisher(okCommand.asJson.noSpaces)
+//          _           <- if()
           _           <- Helpers.election(state)
         } yield( )
     }
