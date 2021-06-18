@@ -12,6 +12,7 @@ import mx.cinvestav.config.DefaultConfig
 import mx.cinvestav.domain.Payloads
 import mx.cinvestav.utils.{Command, RabbitMQUtils}
 import mx.cinvestav.commons.status
+import mx.cinvestav.statusx.BullyStatus
 import mx.cinvestav.commons.commands.Identifiers
 import org.typelevel.log4cats.Logger
 
@@ -47,13 +48,28 @@ object CommandHanlders {
     }
 
 
-  def ok(command: Command[Json],state:Ref[IO,NodeState])(implicit utils:RabbitMQUtils[IO],config:DefaultConfig): IO[Unit] =
-    command.payload.as[Payloads.Ok] match {
+  def ok(command: Command[Json],state:Ref[IO,NodeState])(implicit utils:RabbitMQUtils[IO],config:DefaultConfig,
+                                                         logger: Logger[IO])
+  : IO[Unit] =
+    command.payload.as[payloads.Ok] match {
       case Left(e) =>
         IO.println(e.getMessage())
-      case Right(payload) =>
-        state.update(s=>s.copy(okMessages = s.okMessages.filter(_ != payload.nodeId)))
+      case Right(payload) => for {
+        _            <- Logger[IO].debug(Identifiers.OK+s",${payload.nodeId}")
+        currentState <- state.updateAndGet(s=>s.copy(okMessages = s.okMessages.filter(_ != payload.nodeId)))
+        _            <- currentState.electionSignal.set(true)
+      } yield ()
     }
+
+
+//  def electionIf()(implicit utils:RabbitMQUtils[IO], config:DefaultConfig,logger: Logger[IO]):IO[Unit] = for {
+//    _ <- IO.println("")
+//  } yield()
+//
+//  def electionElse()(implicit utils:RabbitMQUtils[IO], config:DefaultConfig,logger: Logger[IO]):IO[Unit] = for {
+//    _<-IO.println("")
+//  } yield ()
+
   def elections(command: Command[Json],state:Ref[IO,NodeState])(implicit utils:RabbitMQUtils[IO],
                                                                 config:DefaultConfig,logger: Logger[IO]): IO[Unit] =
     command.payload.as[Payloads.Election] match {
@@ -61,11 +77,16 @@ object CommandHanlders {
         IO.println(e.getMessage())
       case Right(payload) =>
         for {
-          _           <- IO.println(s"NEW ELECTIONS -> ${payload.shadowNodeId} - ${payload.nodeId}")
-          okPublisher <- utils.createPublisher(config.poolId,s"${config.poolId}.${payload.shadowNodeId}.default")
-//          heartbeat   <- state.get.map(_.heartBeatCounter)
+          currentState  <- state.get
+//          currentStatus <- currentState.status.pure[IO]
+          bullyNodes    <- currentState.bullyNodes.pure[IO]
+          pubsData      <- Helpers.getPublisherData(bullyNodes,bully => Map("priority"->bully.priority.toString))
+//          _ <- if(currentStatus == BullyStatus.Election)  electionIf() else electionElse()
+//          No check if exists
+          currentPeer <- pubsData.filter(_.nodeId == payload.shadowNodeId).head.pure[IO]
           okCommand   <- CommandData[Json](Identifiers.OK,Payloads.Ok(config.nodeId).asJson).pure[IO]
-          _           <- okPublisher(okCommand.asJson.noSpaces)
+          _           <- Helpers.sendCommad(currentPeer::Nil,okCommand)
+//          _           <- okPublisher(okCommand.asJson.noSpaces)
 //          _           <- if()
           _           <- Helpers.election(state)
         } yield( )
@@ -102,10 +123,10 @@ object CommandHanlders {
     payloadMaybe match {
       case Left(value) =>
         IO.println(value.getMessage())
-      case Right(_) =>
+      case Right(payload) =>
         state.update(s=>s.copy(heartBeatCounter = s.heartBeatCounter+1))
 //          .flatMap(_=>IO.println("<3"))
-          .flatMap(_=>Logger[IO].debug("<3"))
+          .flatMap(_=>Logger[IO].debug(s"HEARTBEAT,${payload.value}"))
     }
   }
 

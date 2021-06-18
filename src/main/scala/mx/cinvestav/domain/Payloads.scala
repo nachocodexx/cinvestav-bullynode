@@ -11,5 +11,7 @@ object Payloads {
   case class Coordinator(nodeId:String,shadowNodeId:String)
   case class RunAll(commands:List[CommandData[Json]])
   case class Run(command:CommandData[Json])
+  case class StopHeartbeat(id:String,nodeId:String)
+  case class StartHeartbeat(id:String,nodeId:String)
 
 }

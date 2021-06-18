@@ -1,7 +1,9 @@
 package mx.cinvestav
 
 //
+import dev.profunktor.fs2rabbit.config.declaration.{AutoDelete, NonDurable}
 import mx.cinvestav.commons.commands.Identifiers
+import org.typelevel.log4cats.SelfAwareStructuredLogger
 // Cats
 import cats.implicits._
 import cats.effect.{ExitCode, IO, IOApp, MonadCancel, Ref}
@@ -31,7 +33,7 @@ import mx.cinvestav.utils.RabbitMQUtils
 object Main extends IOApp{
   implicit val config: DefaultConfig           = ConfigSource.default.loadOrThrow[DefaultConfig]
   implicit val rabbitMqConfig: Fs2RabbitConfig = RabbitMQUtils.dynamicRabbitMQConfig(config.rabbitmq)
-  implicit val unsafeLogger = Slf4jLogger.getLogger[IO]
+  implicit val unsafeLogger: SelfAwareStructuredLogger[IO] = Slf4jLogger.getLogger[IO]
 
 
   def monitoringNode(queueName:String,state:Ref[IO,NodeState],leaderSignal:SignallingRef[IO,Boolean])(implicit utils:RabbitMQUtils[IO]): IO[Unit]
@@ -46,7 +48,7 @@ object Main extends IOApp{
   }
 
 
-  def  program(queueName:String,state:Ref[IO,NodeState])(implicit utils:RabbitMQUtils[IO]) =
+  def  program(queueName:String,state:Ref[IO,NodeState])(implicit utils:RabbitMQUtils[IO]): Stream[IO, Unit] =
     utils.consumeJson(queueName)
     .evalMap{ command=> command.commandId  match {
       case Identifiers.REMOVE_NODE =>
@@ -55,6 +57,7 @@ object Main extends IOApp{
         CommandHanlders.resetState(command,state)
       case Identifiers.ELECTIONS =>
         CommandHanlders.elections(command,state)
+//      case CommandsId.
       case Identifiers.OK =>
         CommandHanlders.ok(command,state)
       case Identifiers.COORDINATOR =>
@@ -86,16 +89,20 @@ object Main extends IOApp{
   override def run(args: List[String]): IO[ExitCode] = {
     RabbitMQUtils.init[IO](rabbitMqConfig){ implicit utils =>
       for {
-//        _    <- IOa.println(config)
-        _  <- if(config.isLeader) Helpers.startLeaderHeartbeat() else IO.unit
+        _       <- utils.createExchange(config.poolId,ExchangeType.Topic,NonDurable,AutoDelete)
+        helpers <- Helpers().pure[IO]
+//
+        _  <- if(config.isLeader) helpers.startLeaderHeartbeat() else IO.unit
+
         _  <- Logger[IO].debug(config.toString)
 //        Init signals
         electionStatusSignal <- SignallingRef[IO,Boolean](false)
         leaderSignal         <- SignallingRef[IO,Boolean](false)
-        _  <- Logger[IO].debug("Init signals [COMPLETED]")
+        _  <- Logger[IO].debug("INIT_SIGNALS")
 //        Init state
         state <- IO.ref[NodeState](initState(signal = electionStatusSignal,leaderSignal = leaderSignal))
-        _  <- Logger[IO].debug("Init state [COMPLETED]")
+        _  <- Logger[IO].debug("INIT_STATE")
+//        _  <- Logger[IO].debug("Init state [COMPLETED]")
 //     MAIN PROGRAM
         queueName <- s"${config.poolId}-${config.nodeId}".pure[IO]
         _     <- utils.createQueue(
@@ -105,14 +112,21 @@ object Main extends IOApp{
           routingKey =  s"${config.poolId}.${config.nodeId}.default"
         )
 //        _  <- utils.bindQueue(queueName,config.poolId,"#.config")
-        _  <- utils.bindQueue(queueName,config.poolId,"shadow.#.config")
+//        _  <- utils.bindQueue(queueName,config.poolId,"shadow.#.config")
         _  <- program(queueName,state).compile.drain.start
-        _  <- Logger[IO].debug("Main program is running successfully")
+        _  <- Logger[IO].debug("START_NODE")
 //      HEALTH CHECK
-        _  <- Logger[IO].debug("Monitoring is running successfully")
+//        _  <- Logger[IO].debug("Monitoring is running successfully")
         heartbeatQueue <- s"${config.poolId}-heartbeat".pure[IO]
-        _   <- utils.declareQueue(heartbeatQueue,durable = Durable,exclusive = NonExclusive,autoDelete = NonAutoDelete)
+        _              <- utils.declareQueue(
+          heartbeatQueue,
+          durable = Durable,
+          exclusive = NonExclusive,
+          autoDelete = NonAutoDelete
+        )
+        _  <- Logger[IO].debug("MONITOR_NODE_START")
         _   <- monitoringNode(heartbeatQueue,state,leaderSignal).start
+        _  <- Logger[IO].debug("HEALTH_CHECKER_START")
         _   <- Helpers.healthCheck(state).compile.drain
 //
       } yield ()

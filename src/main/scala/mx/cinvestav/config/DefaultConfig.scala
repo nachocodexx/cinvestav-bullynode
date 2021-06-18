@@ -9,10 +9,12 @@ case class DefaultConfig(
                           priority: Int,
                           node:String,
                           maxRetries:Int,
+                          maxRetriesOkMessages:Int,
                           isLeader:Boolean,
                           nodes:List[String],
                           bullyNodes:List[BullyNode],
                           leaderNode:String,
                           shadowLeader:String,
+                          healthCheckTime:Int,
                           rabbitmq: RabbitMQConfig
                         )
