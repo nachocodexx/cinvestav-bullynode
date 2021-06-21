@@ -51,27 +51,25 @@ object Main extends IOApp{
   def  program(queueName:String,state:Ref[IO,NodeState])(implicit utils:RabbitMQUtils[IO]): Stream[IO, Unit] =
     utils.consumeJson(queueName)
     .evalMap{ command=> command.commandId  match {
-      case Identifiers.REMOVE_NODE =>
-        CommandHanlders.removeNode(command,state)
-      case Identifiers.RESET_STATE =>
-        CommandHanlders.resetState(command,state)
       case Identifiers.ELECTIONS =>
         CommandHanlders.elections(command,state)
-//      case CommandsId.
       case Identifiers.OK =>
         CommandHanlders.ok(command,state)
       case Identifiers.COORDINATOR =>
         CommandHanlders.coordinator(command,state)
       case Identifiers.RUN =>
         CommandHanlders.run(command,state)
-      case _ =>  state.get.map(_.status).flatMap{  s=>
-        Logger[IO].debug("UKNOWN COMMAND")
+      case _ =>  state.get.flatMap{  s=>
+        Logger[IO].debug("UKNOWN COMMAND") *> Logger[IO].debug(s.toString) *> s.healthCheckSignal.set(true)
       }
     }
 
     }
 
-  def initState(signal:SignallingRef[IO,Boolean],leaderSignal:SignallingRef[IO,Boolean])(implicit config:DefaultConfig)
+  def initState(healthCheckSignal:SignallingRef[IO,Boolean],signal:SignallingRef[IO,Boolean],leaderSignal:SignallingRef[IO,
+    Boolean])
+               (implicit
+                                                                                           config:DefaultConfig)
   : NodeState =
     NodeState(priority = config.priority,
       bullyNodes=config.bullyNodes,
@@ -82,7 +80,10 @@ object Main extends IOApp{
       leader =  config.leaderNode,
       electionSignal = signal,
       leaderSignal = leaderSignal,
-      shadowLeader = config.shadowLeader
+      shadowLeader = config.shadowLeader,
+      node =  config.node,
+      healthCheckSignal = healthCheckSignal,
+      nodes = config.nodes
     )
 
 
@@ -92,15 +93,20 @@ object Main extends IOApp{
         _       <- utils.createExchange(config.poolId,ExchangeType.Topic,NonDurable,AutoDelete)
         helpers <- Helpers().pure[IO]
 //
-        _  <- if(config.isLeader) helpers.startLeaderHeartbeat() else IO.unit
+        _       <- if(config.isLeader) helpers.startLeaderHeartbeat() else IO.unit
 
-        _  <- Logger[IO].debug(config.toString)
+        _       <- Logger[IO].trace(config.toString)
 //        Init signals
         electionStatusSignal <- SignallingRef[IO,Boolean](false)
+        healthCheckSignal    <- SignallingRef[IO,Boolean](false)
         leaderSignal         <- SignallingRef[IO,Boolean](false)
         _  <- Logger[IO].debug("INIT_SIGNALS")
 //        Init state
-        state <- IO.ref[NodeState](initState(signal = electionStatusSignal,leaderSignal = leaderSignal))
+        state <- IO.ref[NodeState](initState(
+          signal = electionStatusSignal,
+          leaderSignal = leaderSignal,
+          healthCheckSignal = healthCheckSignal)
+        )
         _  <- Logger[IO].debug("INIT_STATE")
 //        _  <- Logger[IO].debug("Init state [COMPLETED]")
 //     MAIN PROGRAM
@@ -124,10 +130,10 @@ object Main extends IOApp{
           exclusive = NonExclusive,
           autoDelete = NonAutoDelete
         )
-        _  <- Logger[IO].debug("MONITOR_NODE_START")
+        _  <- Logger[IO].trace("MONITOR_NODE_START")
         _   <- monitoringNode(heartbeatQueue,state,leaderSignal).start
-        _  <- Logger[IO].debug("HEALTH_CHECKER_START")
-        _   <- Helpers.healthCheck(state).compile.drain
+        _  <- Logger[IO].trace("HEALTH_CHECKER_START")
+        _   <- Helpers.healthCheck(state).pauseWhen(healthCheckSignal).compile.drain
 //
       } yield ()
     }.as(ExitCode.Success)

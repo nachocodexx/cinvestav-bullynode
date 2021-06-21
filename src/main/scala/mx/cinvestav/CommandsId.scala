@@ -1,6 +1,7 @@
 package mx.cinvestav
 
 object CommandsId {
+  final val STOP_HEART = "STOP_HEART"
 //  final val HEARTBEAT       = "NODE_HEARTBEAT"
 //  final val REMOVE_NODE     = "REMOVE_NODE"
 //  final val RESET_STATE     = "RESET_STATE"
