@@ -16,5 +16,7 @@ case class DefaultConfig(
                           leaderNode:String,
                           shadowLeader:String,
                           healthCheckTime:Int,
+//
+                          coordinatorWindow:Int,
                           rabbitmq: RabbitMQConfig
                         )

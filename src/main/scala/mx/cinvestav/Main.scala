@@ -1,6 +1,7 @@
 package mx.cinvestav
 
 //
+import cats.effect.std.Queue
 import dev.profunktor.fs2rabbit.config.declaration.{AutoDelete, NonDurable}
 import mx.cinvestav.commons.commands.Identifiers
 import org.typelevel.log4cats.SelfAwareStructuredLogger
@@ -60,31 +61,11 @@ object Main extends IOApp{
       case Identifiers.RUN =>
         CommandHanlders.run(command,state)
       case _ =>  state.get.flatMap{  s=>
-        Logger[IO].debug("UKNOWN COMMAND") *> Logger[IO].debug(s.toString) *> s.healthCheckSignal.set(true)
+        Logger[IO].debug("UNKNOWN COMMAND") *> Logger[IO].debug(s.toString) *> s.healthCheckSignal.set(true)
       }
     }
 
     }
-
-  def initState(healthCheckSignal:SignallingRef[IO,Boolean],signal:SignallingRef[IO,Boolean],leaderSignal:SignallingRef[IO,
-    Boolean])
-               (implicit
-                                                                                           config:DefaultConfig)
-  : NodeState =
-    NodeState(priority = config.priority,
-      bullyNodes=config.bullyNodes,
-      heartBeatCounter = 0,
-      retries =  0,
-      isLeader = config.isLeader,
-      status = status.Up,
-      leader =  config.leaderNode,
-      electionSignal = signal,
-      leaderSignal = leaderSignal,
-      shadowLeader = config.shadowLeader,
-      node =  config.node,
-      healthCheckSignal = healthCheckSignal,
-      nodes = config.nodes
-    )
 
 
   override def run(args: List[String]): IO[ExitCode] = {
@@ -92,6 +73,7 @@ object Main extends IOApp{
       for {
         _       <- utils.createExchange(config.poolId,ExchangeType.Topic,NonDurable,AutoDelete)
         helpers <- Helpers().pure[IO]
+        queue   <- Queue.unbounded[IO,Option[Int]]
 //
         _       <- if(config.isLeader) helpers.startLeaderHeartbeat() else IO.unit
 
@@ -100,15 +82,28 @@ object Main extends IOApp{
         electionStatusSignal <- SignallingRef[IO,Boolean](false)
         healthCheckSignal    <- SignallingRef[IO,Boolean](false)
         leaderSignal         <- SignallingRef[IO,Boolean](false)
+        coordinatorSignal   <-SignallingRef[IO,Boolean](false)
         _  <- Logger[IO].debug("INIT_SIGNALS")
 //        Init state
-        state <- IO.ref[NodeState](initState(
-          signal = electionStatusSignal,
-          leaderSignal = leaderSignal,
-          healthCheckSignal = healthCheckSignal)
+        state <- IO.ref[NodeState](
+          NodeState(priority = config.priority,
+            bullyNodes=config.bullyNodes,
+            heartBeatCounter = 0,
+            retries =  0,
+            isLeader = config.isLeader,
+            status = status.Up,
+            leader =  config.leaderNode,
+            electionSignal = electionStatusSignal,
+            leaderSignal = leaderSignal,
+            shadowLeader = config.shadowLeader,
+            node =  config.node,
+            healthCheckSignal = healthCheckSignal,
+            nodes = config.nodes,
+            maxRetriesQueue = queue,
+            coordinatorSignal = coordinatorSignal
+        )
         )
         _  <- Logger[IO].debug("INIT_STATE")
-//        _  <- Logger[IO].debug("Init state [COMPLETED]")
 //     MAIN PROGRAM
         queueName <- s"${config.poolId}-${config.nodeId}".pure[IO]
         _     <- utils.createQueue(
@@ -119,8 +114,6 @@ object Main extends IOApp{
         )
 //        _  <- utils.bindQueue(queueName,config.poolId,"#.config")
 //        _  <- utils.bindQueue(queueName,config.poolId,"shadow.#.config")
-        _  <- program(queueName,state).compile.drain.start
-        _  <- Logger[IO].debug("START_NODE")
 //      HEALTH CHECK
 //        _  <- Logger[IO].debug("Monitoring is running successfully")
         heartbeatQueue <- s"${config.poolId}-heartbeat".pure[IO]
@@ -133,7 +126,22 @@ object Main extends IOApp{
         _  <- Logger[IO].trace("MONITOR_NODE_START")
         _   <- monitoringNode(heartbeatQueue,state,leaderSignal).start
         _  <- Logger[IO].trace("HEALTH_CHECKER_START")
-        _   <- Helpers.healthCheck(state).pauseWhen(healthCheckSignal).compile.drain
+//        _   <- Helpers.healthCheck(state).pauseWhen(healthCheckSignal).compile.drain
+
+        _     <- Stream.fromQueueNoneTerminated(queue).evalMap{ _=>
+          for {
+//            currentState <- state.get
+//            isCoordWin   <- currentState.coordinatorSignal.get
+//            _            <- if(isCoordWin) Logger[IO].info("ELECTION_IN_PROGRESS")
+//            else
+            _<-Helpers.maxRetriesExceeded(state)
+          } yield ()
+        }
+          .compile.drain.start
+        _   <- Helpers.healthCheck(state).interruptWhen(healthCheckSignal).compile.drain.start
+//        _   <- Helpers.healthCheck(state).pauseWhen(healthCheckSignal).compile.drain.start
+        _  <- Logger[IO].debug("START_NODE")
+        _  <- program(queueName,state).compile.drain
 //
       } yield ()
     }.as(ExitCode.Success)

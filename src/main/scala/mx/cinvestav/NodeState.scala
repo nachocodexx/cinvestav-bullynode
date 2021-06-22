@@ -1,5 +1,6 @@
 package mx.cinvestav
 import cats.effect.IO
+import cats.effect.std.Queue
 import fs2.concurrent.SignallingRef
 import mx.cinvestav.commons.status.Status
 import mx.cinvestav.config.BullyNode
@@ -18,6 +19,12 @@ case class NodeState(
                       nodes:List[String],
                       //                    Experimental
                       electionSignal:SignallingRef[IO,Boolean],
+//                    Monitoring leader
                       leaderSignal:SignallingRef[IO,Boolean],
-                      healthCheckSignal:SignallingRef[IO,Boolean]
+//                    Monitoring health check
+                      healthCheckSignal:SignallingRef[IO,Boolean],
+//
+                      maxRetriesQueue:Queue[IO,Option[Int]],
+//                    Coordinator signal to skip unnecessary election
+                      coordinatorSignal:SignallingRef[IO,Boolean]
                     )

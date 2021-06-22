@@ -61,7 +61,8 @@ object Helpers {
   }
 //
 
-  def healthCheck(state:Ref[IO,NodeState])(implicit utils:RabbitMQUtils[IO],config:DefaultConfig,logger: Logger[IO]): Stream[IO, (Int, FiniteDuration)] =
+  def healthCheck(state:Ref[IO,NodeState])(implicit utils:RabbitMQUtils[IO],config:DefaultConfig,
+                                                logger: Logger[IO]): Stream[IO, (Int, FiniteDuration)] =
     Stream.awakeEvery[IO](config.healthCheckTime milliseconds)
       .evalMapAccumulate(0){
         case (lastHeartbeats,x) =>
@@ -69,14 +70,19 @@ object Helpers {
 //            get current state
             currentState <- state.get
             retries      <- currentState.retries.pure[IO]
-/*          (1)  If coordinator does not respond to it within a time interval T, then it is assumed that coordinator
-                has failed and execute Helpers.maxRetriesExceeded.
- */
-            _            <- if(config.maxRetries == retries) Helpers.maxRetriesExceeded(state) else IO.unit
-            hearbeats    <- currentState.heartBeatCounter.pure[IO]
-            _            <-  if(hearbeats===lastHeartbeats) state.update(s=>s.copy(retries=s.retries+1)) else IO.unit
-            _            <- Logger[IO].trace(s"HEALTH_CHECK ${currentState.shadowLeader} ${currentState.leader}")
-          } yield (hearbeats,x)
+            /*          (1)  If coordinator does not respond to it within a time interval T, then it is assumed that coordinator
+                            has failed and execute Helpers.maxRetriesExceeded.
+             */
+            _            <- if(config.maxRetries == retries) for {
+                            _<-currentState.maxRetriesQueue.offer(1.some)
+                            _<-currentState.healthCheckSignal.set(true)
+                           } yield ()
+                          else IO.unit
+//              Helpers.maxRetriesExceeded(state) else IO.unit
+            heartbeats    <- currentState.heartBeatCounter.pure[IO]
+            _            <-  if(heartbeats===lastHeartbeats) state.update(s=>s.copy(retries=s.retries+1)) else IO.unit
+//            _            <- Logger[IO].info(s"HEALTH_CHECK ${currentState.shadowLeader} ${currentState.leader}")
+          } yield (heartbeats,x)
       }
 
 
@@ -112,8 +118,15 @@ object Helpers {
   } yield ( )
 
 //
+  def enableMonitoring(state:Ref[IO,NodeState])(implicit utils: RabbitMQUtils[IO],logger: Logger[IO],config: DefaultConfig): IO[Unit] =
+    for {
+    currentState <- state.get
+    _ <- Logger[IO].info("MONITORING ENABLED")
+    _ <- currentState.healthCheckSignal.set(false)
+    _ <- Helpers.healthCheck(state).interruptWhen(currentState.healthCheckSignal).compile.drain.start
+  } yield ()
 
-//  def sendCoordinatorCmd(lowest:List[(String, String=>IO[Unit])], state:Ref[IO,NodeState], electionSignal:SignallingRef[IO,Boolean])(implicit
+  //  def sendCoordinatorCmd(lowest:List[(String, String=>IO[Unit])], state:Ref[IO,NodeState], electionSignal:SignallingRef[IO,Boolean])(implicit
   def sendCoordinatorCmd(lowest:List[PublisherData], state:Ref[IO,NodeState], electionSignal:SignallingRef[IO,Boolean])(implicit
                                                                                                                                      utils: RabbitMQUtils[IO],
                                                                                                                         config: DefaultConfig,
@@ -131,24 +144,40 @@ object Helpers {
         )
       )
       //        Send stop heart command
-      _             <- Helpers.sendStopHeartbeat(previousState.leader,config.nodeId)
+//      _             <- Helpers.sendStopHeartbeat(previousState.leader,config.nodeId)
       // Start heart in new leader node
       _             <- Helpers.sendStartHeartbeat(config.node,config.nodeId)
-      nodes          <- previousState.nodes.filter(_!=previousState.leader).pure[IO]
+      //      Send new coordinator
+      nodes          <- (previousState.nodes.filter(_!=previousState.leader):+config.node).pure[IO]
       pubs           <- Helpers.getPublisherData_(nodes)
       newCoordinatorPayload <- Payloads.NewCoordinator(previousState.leader,config.node).asJson.pure[IO]
       newCoordinatorCmd <- CommandData[Json](Identifiers.NEW_COORDINATOR,newCoordinatorPayload).pure[IO]
       _                <- Helpers.sendCommand(pubs,newCoordinatorCmd)
-//      _              <- pubs.traverse(_.publish(newCoordinatorCmd.asJson.noSpaces))
-      // Stop the watcher of the election process
-      _              <- electionSignal.set(true)
+//      _              <- previousState.leaderSignal.set(true)
+      coordWin = Logger[IO].info("COORDINATOR_WINDOW_TIME_STARTED")
+      coordWinEnd = Logger[IO].info("COORDINATOR_WINDOW_TIME_FINISH")
+      _ <- (
+        previousState.coordinatorSignal.set(true) *>coordWin*>IO.sleep(config.coordinatorWindow milliseconds) *>
+        previousState
+          .coordinatorSignal
+          .set(false)*>
+        coordWinEnd
+        ).start
+      //      _              <- previousState.coordinatorSignal.set(true) 
 //    Enable monitoring
-      _             <- previousState.healthCheckSignal.set(false)
+      _<- Helpers.enableMonitoring(state)
+//      _             <-  for {
+//        _ <- Logger[IO].info("ENABLE MONITORING")
+//        _ <- previousState.healthCheckSignal.set(false)
+//        _ <- Helpers.healthCheck(state).interruptWhen(previousState.healthCheckSignal).compile.drain.start
+//      } yield ()
 //    Send coordinator command to all the lowest nodes
       coordinatorCmdPayload <- Payloads.Coordinator(config.node,config.nodeId).asJson.pure[IO]
       coordinatorCmd        <- CommandData[Json](Identifiers.COORDINATOR,coordinatorCmdPayload).pure[IO]
       _                     <- Helpers.sendCommand(lowest,coordinatorCmd)
       _              <- Logger[IO].debug(s"COORDINATOR_COMMAND_SENT ${lowest.length} ${lowest.map(_.nodeId).mkString(" ")}")
+      // Stop the watcher of the election process
+      _              <- electionSignal.set(true)
 
     } yield ()
   }
@@ -169,12 +198,14 @@ object Helpers {
         .evalMapAccumulate(0){ (x,fd)=>
           for {
             currentState <- state.get
+            currentStatus <- currentState.status.pure[IO]
 //            _signal      <- currentState.electionSignal.pure[IO]
-            okMessages   <- currentState.okMessages.pure[IO]
-            _            <- if(x >= config.maxRetriesOkMessages && okMessages.length === highest.length)
+//            okMessages   <- currentState.okMessages.pure[IO]
+            _            <- if(x == config.maxRetriesOkMessages && currentStatus == statusx.BullyStatus.Election )
                                 Helpers.sendCoordinatorCmd(lowest,state,electionSignal)
-                            else IO.unit
-            _            <- Logger[IO].debug(s"MONITOR_OK_MESSAGES $x ${okMessages.length}")
+                            else  IO.unit
+//              Logger[IO].info(s"ELECTION_IN_PROCESS")
+//            _            <- Logger[IO].debug(s"MONITOR_OK_MESSAGES $x ${okMessages.length}")
 //            _            <- if(okMessages.isEmpty)  signal.set(true) else IO.unit
           } yield (x+1,fd)
         }
@@ -224,22 +255,22 @@ object Helpers {
     predicate(priority)
   }
 
-  def election(state:Ref[IO,NodeState])(implicit utils:RabbitMQUtils[IO],config:DefaultConfig,
-  logger: Logger[IO])
-  : IO[Unit] = {
-      def doBully(currentState:NodeState, highestPubData:List[PublisherData], lowestPubData:List[PublisherData]) =
-        for {
-
+  def doBully(state:Ref[IO,NodeState],currentState:NodeState, highestPubData:List[PublisherData], lowestPubData:List[PublisherData])(implicit utils: RabbitMQUtils[IO],config: DefaultConfig,
+                                                 logger: Logger[IO]): IO[Unit] =
+    for {
       electionCmd  <- CommandData[Json](Identifiers.ELECTIONS,Payloads.Election(config.node,config.nodeId).asJson).pure[IO]
       /*/
          Now process P sends election message to every process with high priority number.
          if high priority nodes list is empty
        */
       _  <- electionBackgroundTask(state,currentState,highestPubData,lowest = lowestPubData).start
-//      _    <- Logger[IO].debug(s"ELECTION_COMMAND,${highestPubData.map(_.nodeId).mkString(",")}")
+      //      _    <- Logger[IO].debug(s"ELECTION_COMMAND,${highestPubData.map(_.nodeId).mkString(",")}")
       _ <- Helpers.sendCommand(highestPubData,electionCmd)
       _    <- Logger[IO].debug(s"ELECTION_COMMAND_SENT ${highestPubData.length} ${highestPubData.map(_.nodeId).mkString(" ")}")
     } yield ()
+  def election(state:Ref[IO,NodeState])(implicit utils:RabbitMQUtils[IO],config:DefaultConfig,
+  logger: Logger[IO])
+  : IO[Unit] = {
 
     for {
 //      _            <- Logger[IO].debug(s"INIT_ELECTION")
@@ -255,7 +286,7 @@ object Helpers {
       _             <- if(higherNodes.isEmpty)
                        Helpers.sendCoordinatorCmd(lowerNodes,state,electionSignal)
                     else
-                      doBully(currentState,higherNodes,lowerNodes)
+                      Helpers.doBully(state,currentState,higherNodes,lowerNodes)
     } yield ()
   }
 
@@ -265,13 +296,13 @@ object Helpers {
   =for {
     _            <- Logger[IO].debug("MAX_RETRIES_REACHED")
 //    RESET RETRIES
-      currentState <- state.updateAndGet(_.copy(retries = 0))
+      currentState <- state.getAndUpdate(_.copy(retries = 0))
+    isCoordWin     <- currentState.coordinatorSignal.get
+    _              <- Logger[IO].debug(s"COORDINATOR WINDOW IS ACTIVE?: $isCoordWin")
      _             <- currentState.healthCheckSignal.set(true)
-      _            <- if(currentState.isLeader)
-                        Logger[IO].debug(
-                          s"NO_ELECTION_CURRENT_LEADER ${currentState.shadowLeader} ${currentState.leader}"
-                        )
-                      else Helpers.election(state)
+    noElectionLog = Logger[IO].debug(s"ELECTION_SKIPPED ${currentState.shadowLeader} ${currentState.leader}")
+    _            <- if(currentState.isLeader || isCoordWin) noElectionLog *> Helpers.enableMonitoring(state)
+                    else Helpers.election(state)
   } yield ()
 
 }

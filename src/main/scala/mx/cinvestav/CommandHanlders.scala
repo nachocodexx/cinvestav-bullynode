@@ -16,6 +16,8 @@ import mx.cinvestav.commons.status
 import mx.cinvestav.statusx.BullyStatus
 import mx.cinvestav.commons.commands.Identifiers
 import org.typelevel.log4cats.Logger
+import scala.concurrent.duration._
+import scala.language.postfixOps
 
 object CommandHanlders {
 
@@ -59,10 +61,19 @@ object CommandHanlders {
             retries = 0
           )
           )
-            _ <- currentState.healthCheckSignal.set(false)
+          _ <- currentState.coordinatorSignal.set(true)
+          _ <- currentState.electionSignal.set(false)
+          _ <- currentState.healthCheckSignal.set(true)
+          _ <- Helpers.enableMonitoring(state)
+          coordWin = Logger[IO].info("COORDINATOR_WINDOW_TIME_START")
+          coordWinEnd = Logger[IO].info("COORDINATOR_WINDOW_TIME_FINISH")
+          _ <- (coordWin*>IO.sleep(config.coordinatorWindow milliseconds) *> currentState.coordinatorSignal.set
+          (false) *> coordWinEnd).start
+//            _ <- currentState.healthCheckSignal.set(false)
         } yield ()
     }
 
+//  OK
 
   def ok(command: Command[Json],state:Ref[IO,NodeState])(implicit utils:RabbitMQUtils[IO],config:DefaultConfig,
                                                          logger: Logger[IO])
@@ -78,7 +89,7 @@ object CommandHanlders {
       } yield ()
     }
 
-
+// ELECTIONS
   def elections(command: Command[Json],state:Ref[IO,NodeState])(implicit utils:RabbitMQUtils[IO],
                                                                 config:DefaultConfig,logger: Logger[IO]): IO[Unit] = {
 
@@ -95,16 +106,20 @@ object CommandHanlders {
       case Right(payload) =>
         for {
 //          _             <
-          currentState  <- state.get
+          currentState     <- state.get
+          isCoordWinActive <- currentState.coordinatorSignal.get
 //          bullyNodes    <- currentState.bullyNodes.pure[IO]
 //          pubsData      <- Helpers.getPublisherData(bullyNodes,bully => Map("priority"->bully.priority.toString))
           pubsData <- Helpers.getPublisherData_(payload.shadowNodeId::Nil)
 //          No check if exists
           _ <- sendOk(pubsData)
-          _ <- if(currentState.status == BullyStatus.Election)
+          _ <- if(currentState.status == BullyStatus.Election || isCoordWinActive)
                     Logger[IO].debug(s"SKIP_ELECTION ${payload.shadowNodeId} ${payload.nodeId}")
                else for {
                    _ <-Logger[IO].debug(s"ELECTION ${payload.shadowNodeId} ${payload.nodeId}")
+                   //          STOP HEALTH CHECK & ELECTION PROCESS
+                   _ <- currentState.healthCheckSignal.set(true)
+                   _  <- currentState.electionSignal.set(true)
                    _ <-Helpers.election(state)
                 } yield ()
         } yield( )
